@@ -20,7 +20,7 @@ if ($MyInvocation.MyCommand.Path) {
     } catch {}
 }
 
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Continue"
 $ConfirmPreference = "None"
 
 # ── 颜色输出 ──
@@ -33,68 +33,84 @@ function Write-Step { param($Msg) Write-Host "`n━━━ $Msg ━━━`n" -For
 # ── 全局变量 ──
 $OpenClawDirs = @()
 $ConfigDirs = @()
-$UninstallMode = "custom"  # minimal | custom | full
+$UninstallMode = "custom"
 
 function Get-LocalAppData {
     if ($env:LOCALAPPDATA) { return $env:LOCALAPPDATA }
     return (Join-Path $HOME "AppData\Local")
 }
 
+function Get-PnpmHome {
+    # 从注册表读取 PNPM_HOME，不使用进程环境变量
+    $pnpmHome = [Environment]::GetEnvironmentVariable("PNPM_HOME", "User")
+    if (-not $pnpmHome) {
+        $pnpmHome = [Environment]::GetEnvironmentVariable("PNPM_HOME", "Machine")
+    }
+    if (-not $pnpmHome) {
+        $pnpmHome = Join-Path (Get-LocalAppData) "pnpm"
+    }
+    return $pnpmHome
+}
+
+function Get-PnpmCmd {
+    $pnpmHome = Get-PnpmHome
+    $cmd = Join-Path $pnpmHome "pnpm.cmd"
+    if (Test-Path $cmd) { return $cmd }
+    
+    # 尝试从 PATH 中查找
+    try {
+        $pnpmInPath = Get-Command pnpm -ErrorAction SilentlyContinue
+        if ($pnpmInPath) { return $pnpmInPath.Source }
+    } catch {}
+    
+    return "pnpm.cmd"
+}
+
+# ── 检测 OpenClaw 是否已安装 ──
+function Test-OpenClawInstalled {
+    $pnpmHome = Get-PnpmHome
+    $pnpmGlobalBin = Join-Path $pnpmHome "global\node_modules\.bin"
+    $npmGlobalBin = Join-Path $env:APPDATA "npm"
+    
+    $checkPaths = @(
+        (Join-Path $pnpmGlobalBin "openclaw.cmd"),
+        (Join-Path $pnpmGlobalBin "openclaw.ps1"),
+        (Join-Path $npmGlobalBin "openclaw.cmd"),
+        (Join-Path $npmGlobalBin "openclaw.ps1")
+    )
+    
+    foreach ($path in $checkPaths) {
+        if (Test-Path $path) {
+            return @{ 
+                Installed = $true
+                Path = $path
+                BinDir = Split-Path $path -Parent
+            }
+        }
+    }
+    
+    return @{ Installed = $false; Path = $null; BinDir = $null }
+}
+
 # ── 查找 OpenClaw 安装位置 ──
 function Find-OpenClaw {
     Write-Step "步骤 1/5: 查找 OpenClaw 安装位置"
     
-    $searchDirs = @()
+    $checkResult = Test-OpenClawInstalled
     
-    # pnpm 全局 bin 目录
-    $pnpmHome = $env:PNPM_HOME
-    if (-not $pnpmHome) {
-        $pnpmHome = Join-Path (Get-LocalAppData) "pnpm"
-    }
-    if (Test-Path $pnpmHome) { $searchDirs += $pnpmHome }
-    
-    # pnpm global 子目录
-    $pnpmGlobalDir = Join-Path $pnpmHome "global"
-    if (Test-Path $pnpmGlobalDir) {
-        Get-ChildItem -Path $pnpmGlobalDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $binDir = Join-Path $_.FullName "node_modules\.bin"
-            if (Test-Path $binDir) { $searchDirs += $binDir }
+    if ($checkResult.Installed) {
+        Write-Ok "找到 OpenClaw: $($checkResult.Path)"
+        $script:OpenClawDirs += $checkResult.BinDir
+        
+        # 同时检查 pnpm 全局目录
+        $pnpmHome = Get-PnpmHome
+        $pnpmGlobal = Join-Path $pnpmHome "global\node_modules\openclaw"
+        if (Test-Path $pnpmGlobal) {
+            $script:OpenClawDirs += $pnpmGlobal
+            Write-Ok "找到 OpenClaw 模块目录：$pnpmGlobal"
         }
-    }
-    
-    # npm 全局目录
-    if ($env:APPDATA) {
-        $appDataNpm = Join-Path $env:APPDATA "npm"
-        if (Test-Path $appDataNpm) { $searchDirs += $appDataNpm }
-    }
-    
-    # Node.js 目录
-    $nodeDir = Join-Path (Get-LocalAppData) "nodejs"
-    if (Test-Path $nodeDir) { $searchDirs += $nodeDir }
-    
-    # 使用 where.exe 查找
-    try {
-        $whereResult = & where.exe openclaw 2>$null
-        if ($whereResult) {
-            $whereResult -split "`r?`n" | ForEach-Object {
-                $line = $_.Trim()
-                if ($line -and (Test-Path $line)) {
-                    $searchDirs += (Split-Path $line -Parent)
-                }
-            }
-        }
-    } catch {}
-    
-    # 在搜索目录中查找 openclaw 文件
-    foreach ($dir in $searchDirs) {
-        foreach ($name in @("openclaw.cmd", "openclaw.exe", "openclaw.ps1")) {
-            $candidate = Join-Path $dir $name
-            if (Test-Path $candidate) {
-                Write-Ok "找到 OpenClaw: $candidate"
-                $script:OpenClawDirs += $dir
-                return $true
-            }
-        }
+        
+        return $true
     }
     
     Write-Warn "未找到 OpenClaw 可执行文件"
@@ -105,14 +121,12 @@ function Find-OpenClaw {
 function Find-ConfigDirs {
     Write-Step "步骤 2/5: 查找配置和数据目录"
     
-    # 用户目录下的 .openclaw
     $userConfig = Join-Path $HOME ".openclaw"
     if (Test-Path $userConfig) {
         Write-Ok "找到配置目录：$userConfig"
         $script:ConfigDirs += $userConfig
     }
     
-    # LocalAppData 下的 openclaw
     $localData = Join-Path (Get-LocalAppData) "openclaw"
     if (Test-Path $localData) {
         Write-Ok "找到数据目录：$localData"
@@ -128,7 +142,6 @@ function Find-ConfigDirs {
 function Stop-OpenClawServices {
     Write-Step "步骤 3/5: 停止 OpenClaw 服务"
     
-    # 查找并终止 openclaw 进程
     $processes = Get-Process | Where-Object { $_.ProcessName -like "*openclaw*" }
     if ($processes) {
         Write-Info "正在停止 OpenClaw 进程..."
@@ -143,23 +156,6 @@ function Stop-OpenClawServices {
     } else {
         Write-Info "未发现运行中的 OpenClaw 进程"
     }
-    
-    # 查找并终止 node 进程（如果是 OpenClaw 启动的）
-    $nodeProcesses = Get-Process | Where-Object { 
-        $_.ProcessName -eq "node" -and 
-        $_.CommandLine -like "*openclaw*" 
-    } 2>$null
-    if ($nodeProcesses) {
-        Write-Info "正在停止 Node.js OpenClaw 进程..."
-        foreach ($proc in $nodeProcesses) {
-            try {
-                Stop-Process -Id $proc.Id -Force
-                Write-Ok "已终止 Node 进程 (PID: $($proc.Id))"
-            } catch {
-                Write-Warn "无法终止 Node 进程"
-            }
-        }
-    }
 }
 
 # ── 卸载 OpenClaw ──
@@ -171,15 +167,7 @@ function Uninstall-OpenClaw {
         return
     }
     
-    # 尝试使用 pnpm 卸载
-    $pnpmCmd = "pnpm"
-    $pnpmHome = $env:PNPM_HOME
-    if (-not $pnpmHome) {
-        $pnpmHome = Join-Path (Get-LocalAppData) "pnpm"
-    }
-    $pnpmExe = Join-Path $pnpmHome "pnpm.cmd"
-    if (Test-Path $pnpmExe) { $pnpmCmd = $pnpmExe }
-    
+    $pnpmCmd = Get-PnpmCmd
     Write-Info "正在使用 pnpm 卸载 OpenClaw..."
     try {
         & $pnpmCmd remove -g openclaw 2>&1 | Out-Null
@@ -188,7 +176,6 @@ function Uninstall-OpenClaw {
         Write-Warn "pnpm 卸载失败，将手动删除文件"
     }
     
-    # 手动删除剩余文件
     Write-Info "正在清理剩余文件..."
     foreach ($dir in $script:OpenClawDirs) {
         foreach ($name in @("openclaw.cmd", "openclaw.exe", "openclaw.ps1", "openclaw")) {
@@ -244,10 +231,7 @@ function Select-UninstallMode {
     
     $localAppData = Get-LocalAppData
     $nodeDir = Join-Path $localAppData "nodejs"
-    $pnpmHome = $env:PNPM_HOME
-    if (-not $pnpmHome) {
-        $pnpmHome = Join-Path $localAppData "pnpm"
-    }
+    $pnpmHome = Get-PnpmHome
     
     $hasNode = Test-Path $nodeDir
     $hasPnpm = Test-Path $pnpmHome
@@ -295,7 +279,6 @@ function Select-UninstallMode {
 function Cleanup-Env {
     Write-Step "清理环境变量"
     
-    # 从用户 PATH 中移除 openclaw 相关路径
     $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
     if ($userPath) {
         $originalPath = $userPath
@@ -319,18 +302,13 @@ function Cleanup-Env {
         }
     }
     
-    # 根据卸载模式决定是否删除 Node.js 和 pnpm
     Write-Host ""
     
     $localAppData = Get-LocalAppData
     $nodeDir = Join-Path $localAppData "nodejs"
-    $pnpmHome = $env:PNPM_HOME
-    if (-not $pnpmHome) {
-        $pnpmHome = Join-Path $localAppData "pnpm"
-    }
+    $pnpmHome = Get-PnpmHome
     
     if ($script:UninstallMode -eq "full") {
-        # 全量模式：直接删除
         if (Test-Path $nodeDir) {
             Write-Info "全量卸载模式：正在删除 Node.js..."
             try {
@@ -352,7 +330,6 @@ function Cleanup-Env {
         }
         
     } elseif ($script:UninstallMode -eq "custom") {
-        # 自定义模式：逐项询问
         if (Test-Path $nodeDir) {
             Write-Warn "检测到脚本安装的 Node.js: $nodeDir"
             $cleanNode = Read-Host "是否删除此目录？[y/N]"
@@ -380,7 +357,6 @@ function Cleanup-Env {
         }
         
     } else {
-        # 精简模式：保留
         Write-Info "精简卸载模式：保留 Node.js 和 pnpm"
     }
 }
@@ -392,10 +368,13 @@ function Main {
     Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Blue
     Write-Host ""
     
-    # 检查是否已安装
-    $existingVer = try { & openclaw -v 2>$null } catch { $null }
-    if (-not $existingVer) {
+    # 检测是否已安装（只检查文件是否存在，不执行命令）
+    $checkResult = Test-OpenClawInstalled
+    
+    if (-not $checkResult.Installed) {
         Write-Warn "未检测到 OpenClaw，可能已经卸载"
+        Write-Host ""
+        Write-Info "提示：OpenClaw 可能安装在非标准路径，或者已被卸载"
         $force = Read-Host "是否继续清理配置目录？[y/N]"
         if ($force -notmatch "^[Yy]") {
             Write-Host ""
@@ -404,7 +383,7 @@ function Main {
             return
         }
     } else {
-        Write-Info "当前版本：OpenClaw $existingVer"
+        Write-Ok "检测到 OpenClaw：$($checkResult.Path)"
     }
     
     Write-Host ""
@@ -421,9 +400,7 @@ function Main {
     
     Write-Host ""
     
-    # 选择卸载模式
     Select-UninstallMode
-    
     Find-OpenClaw | Out-Null
     Find-ConfigDirs | Out-Null
     Stop-OpenClawServices
@@ -441,8 +418,3 @@ function Main {
 }
 
 Main
-
-# 刷新当前进程的 PATH
-$machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-$env:PATH = "$userPath;$machinePath"

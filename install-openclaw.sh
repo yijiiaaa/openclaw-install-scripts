@@ -97,10 +97,23 @@ install_node_direct() {
   local user_dir="$HOME/.local/node"
   info "正在安装到用户目录 $user_dir..."
   mkdir -p "$user_dir"
-  if tar -xzf "$tmp_file" -C "$user_dir" --strip-components=1; then
-    export PATH="$user_dir/bin:$PATH"
-    installed=true
-    success "Node.js 已安装到 $user_dir"
+  
+  # 先解压到临时目录，再移动文件（更可靠）
+  local extract_dir="$tmp_path/extract"
+  mkdir -p "$extract_dir"
+  if tar -xzf "$tmp_file" -C "$extract_dir"; then
+    # 查找解压后的目录
+    local node_dir
+    node_dir=$(find "$extract_dir" -maxdepth 1 -type d -name "node-*" | head -1)
+    if [[ -n "$node_dir" ]]; then
+      # 复制文件到目标目录
+      cp -r "$node_dir"/* "$user_dir/"
+      export PATH="$user_dir/bin:$PATH"
+      installed=true
+      success "Node.js 已安装到 $user_dir"
+    else
+      error "无法找到解压后的 Node.js 目录"
+    fi
   fi
   
   rm -rf "$tmp_path"
@@ -215,21 +228,33 @@ step_install_openclaw() {
   # 使用 npmmirror 镜像源（国内更快，且避免 GitHub SSH 问题）
   export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"
   
+  # 优先使用 pnpm（如果已安装）
+  if command -v pnpm &>/dev/null; then
+    info "检测到 pnpm，使用 pnpm 安装..."
+    if pnpm add -g openclaw@latest 2>&1; then
+      success "OpenClaw 已通过 pnpm 安装完成"
+      return 0
+    fi
+    warn "pnpm 安装失败，尝试使用 npm..."
+  fi
+  
+  # 检查 npm 是否可用
+  if ! command -v npm &>/dev/null; then
+    error "未找到 npm，请先安装 Node.js"
+    return 1
+  fi
+  
   if npm install -g openclaw@latest 2>&1; then
     success "OpenClaw 安装完成"
     return 0
   fi
   
-  # 如果失败，尝试使用 pnpm 安装
-  warn "npm 安装失败，尝试使用 pnpm 安装..."
-  if command -v pnpm &>/dev/null || npm install -g pnpm 2>&1; then
-    if pnpm add -g openclaw@latest 2>&1; then
-      success "OpenClaw 已通过 pnpm 安装完成"
-      return 0
-    fi
-  fi
-  
   error "OpenClaw 安装失败"
+  echo ""
+  echo "  可能的原因和解决方案："
+  echo "    1. 网络问题 - 检查网络连接后重试"
+  echo "    2. Git 未配置 - 运行 'git config --global user.email' 配置邮箱"
+  echo "    3. 手动安装 - 运行：npm install -g openclaw@latest"
   return 1
 }
 
@@ -264,11 +289,11 @@ add_to_shell_config() {
     pnpm_bin=$(dirname "$pnpm_path")
   fi
   
-  # 检测 shell 类型（使用 ${VAR-} 语法避免未定义变量报错）
+  # 检测 shell 类型（使用 ${VAR:-} 语法避免未定义变量报错）
   local shell_config=""
-  if [[ -n "${ZSH_VERSION-}" ]] || [[ -f "$HOME/.zshrc" ]]; then
+  if [[ -n "${ZSH_VERSION:-}" ]] || [[ -f "$HOME/.zshrc" ]]; then
     shell_config="$HOME/.zshrc"
-  elif [[ -n "${BASH_VERSION-}" ]] || [[ -f "$HOME/.bashrc" ]]; then
+  elif [[ -n "${BASH_VERSION:-}" ]] || [[ -f "$HOME/.bashrc" ]]; then
     shell_config="$HOME/.bashrc"
   elif [[ -f "$HOME/.bash_profile" ]]; then
     shell_config="$HOME/.bash_profile"
@@ -295,12 +320,14 @@ add_to_shell_config() {
       echo ""
       
       # 尝试使用 sudo 修复权限
-      read -rp "是否使用 sudo 修复文件权限？[y/N] " fix_perm
-      if [[ "$fix_perm" =~ ^[Yy] ]]; then
-        if sudo chown "$USER:$USER" "$shell_config" 2>/dev/null; then
-          success "已修复文件权限"
-        else
-          warn "修复权限失败，请手动执行上述命令"
+      if [[ -t 0 ]]; then
+        read -rp "是否使用 sudo 修复文件权限？[y/N] " fix_perm
+        if [[ "$fix_perm" =~ ^[Yy] ]]; then
+          if sudo chown "$USER:$USER" "$shell_config" 2>/dev/null; then
+            success "已修复文件权限"
+          else
+            warn "修复权限失败，请手动执行上述命令"
+          fi
         fi
       fi
     fi

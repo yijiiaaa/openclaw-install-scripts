@@ -45,8 +45,16 @@ find_openclaw() {
     fi
     
     # 检查 pnpm 全局目录
-    local pnpm_home="${PNPM_HOME:-$HOME/.local/share/pnpm}"
-    if [[ -d "$pnpm_home" ]]; then
+    local pnpm_home="${PNPM_HOME:-}"
+    if [[ -z "$pnpm_home" ]]; then
+        # 尝试从常见位置查找
+        if [[ -d "$HOME/.local/share/pnpm" ]]; then
+            pnpm_home="$HOME/.local/share/pnpm"
+        elif [[ -d "$HOME/.pnpm-core-sdk" ]]; then
+            pnpm_home="$HOME/.pnpm-core-sdk"
+        fi
+    fi
+    if [[ -n "$pnpm_home" ]] && [[ -d "$pnpm_home" ]]; then
         local pnpm_openclaw="$pnpm_home/openclaw"
         if [[ -d "$pnpm_openclaw" ]]; then
             success "找到 pnpm 安装目录：$pnpm_openclaw"
@@ -278,7 +286,16 @@ cleanup_env() {
     step "清理环境变量"
     
     local node_dir="$HOME/.local/node"
-    local pnpm_home="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+    local pnpm_home="${PNPM_HOME:-}"
+    if [[ -z "$pnpm_home" ]]; then
+        if [[ -d "$HOME/.local/share/pnpm" ]]; then
+            pnpm_home="$HOME/.local/share/pnpm"
+        elif [[ -d "$HOME/.pnpm-core-sdk" ]]; then
+            pnpm_home="$HOME/.pnpm-core-sdk"
+        else
+            pnpm_home="$HOME/.local/share/pnpm"
+        fi
+    fi
     
     # 自动从 shell 配置中移除安装脚本添加的 PATH
     local profiles=()
@@ -294,8 +311,15 @@ cleanup_env() {
             # 创建备份
             cp "$profile" "$profile.openclaw.bak"
             # 删除标记行和后续两行（PATH 配置）
-            sed -i.bak '/OpenClaw 安装脚本添加/,+2d' "$profile"
-            rm -f "$profile.bak" 2>/dev/null || true
+            # macOS 和 Linux 的 sed -i 语法不同
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                # macOS 需要 sed -i '.bak' 或 sed -i '' 
+                sed -i '' '/OpenClaw 安装脚本添加/,+2d' "$profile" 2>/dev/null || true
+            else
+                # Linux
+                sed -i '/OpenClaw 安装脚本添加/,+2d' "$profile" 2>/dev/null || true
+            fi
+            rm -f "$profile.openclaw.bak" 2>/dev/null || true
             success "已清理：$profile"
             removed=true
         fi
@@ -368,22 +392,6 @@ elif [[ -e /dev/tty ]]; then
     HAS_TTY=true
 fi
 
-prompt_read() {
-    local var_name="$1"
-    local prompt_text="$2"
-    local default_val="${3:-}"
-    if [[ "$HAS_TTY" == "true" ]]; then
-        if [[ -t 0 ]]; then
-            read -rp "$prompt_text" "$var_name"
-        else
-            read -rp "$prompt_text" "$var_name" < /dev/tty
-        fi
-    else
-        warn "非交互模式，无法读取用户输入"
-        printf -v "$var_name" '%s' "$default_val"
-    fi
-}
-
 # ── 主函数 ──
 main() {
     echo ""
@@ -425,7 +433,10 @@ main() {
     # 选择卸载模式
     select_uninstall_mode
     
-    find_openclaw || true
+    # 查找安装位置（即使未找到也继续，因为用户可能想清理配置）
+    find_openclaw || {
+        warn "未找到 OpenClaw 安装位置，但仍可清理配置目录"
+    }
     find_config_dirs
     stop_openclaw_services
     uninstall_openclaw
