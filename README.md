@@ -19,6 +19,8 @@
 ---
 
 ## 🚀 快速开始
+> 请在脚本所在目录执行命令
+>
 
 ### Windows (PowerShell)
 
@@ -43,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File uninstall-openclaw.ps1
 **中文乱码时改用：**
 
 ```
-& {$w=New-Object Net.WebClient;$w.Encoding=[Text.Encoding]::UTF8;Invoke-Expression $w.DownloadString((Get-Item .\install-openclaw.ps1).FullName)}
+& {$w=New-Object Net.WebClient;$w.Encoding=[Text.Encoding]::UTF8;Invoke-Expression $w.DownloadString((Get-Item .\uninstall-openclaw.ps1).FullName)}
 ```
 
 ---
